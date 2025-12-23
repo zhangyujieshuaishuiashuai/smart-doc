@@ -1,9 +1,10 @@
 import fitz  # PyMuPDF
 import camelot
+import pdfplumber
 from paddleocr import PaddleOCR
-import os
 import logging
-import traceback
+import os
+import tempfile
 
 # 抑制 PaddleOCR 的繁杂日志
 logging.getLogger("ppocr").setLevel(logging.ERROR)
@@ -15,31 +16,51 @@ class DocParser:
         # 注意：不要加 show_log 参数
         self.ocr = PaddleOCR(use_angle_cls=True, lang="ch")
 
+    def ocr_image(self, image_path):
+        ocr_result = self.ocr.ocr(image_path)
+        if not ocr_result or not ocr_result[0]:
+            return ""
+        return "\n".join([line[1][0] for line in ocr_result[0] if line[1][1] > 0.6])
+
+    def extract_tables(self, file_path):
+        print(f">>> [Parser] 正在提取表格结构: {file_path}")
+        table_entries = []
+        try:
+            tables = camelot.read_pdf(file_path, pages='all', flavor='lattice', line_scale=40)
+            for table_id, table in enumerate(tables):
+                table_entries.append({
+                    "table_id": table_id,
+                    "page_no": table.page,
+                    "table_markdown": table.df.to_markdown(index=False),
+                    "table_json": {
+                        "columns": list(table.df.columns),
+                        "rows": table.df.to_dict(orient="records"),
+                    }
+                })
+            print(f">>> [Parser] 共提取到 {len(table_entries)} 个结构化表格")
+        except Exception as e:
+            print(f"⚠️ 表格提取部分失败: {e}")
+        return table_entries
+
     def parse_pdf(self, file_path):
         """
         高精度解析：300DPI截图 + 表格容错 + 结构化清洗
         """
         full_content = []
-        
-        # --- 1. 表格解析阶段 (Camelot) ---
-        print(f">>> [Parser] 正在提取表格结构: {file_path}")
+        pages = []
+        os.makedirs("temp_uploads", exist_ok=True)
+        table_entries = self.extract_tables(file_path)
         table_map = {}
+        for table in table_entries:
+            table_map.setdefault(table["page_no"], []).append(table)
+
+        text_layers = []
         try:
-            # 提取表格，line_scale 调大有助于识别线条
-            tables = camelot.read_pdf(file_path, pages='all', flavor='lattice', line_scale=40)
-            
-            for table in tables:
-                page_idx = table.page - 1
-                if page_idx not in table_map:
-                    table_map[page_idx] = []
-                
-                # 转为 Markdown
-                md_text = table.df.to_markdown(index=False)
-                table_map[page_idx].append(md_text)
-                
-            print(f">>> [Parser] 共提取到 {len(tables)} 个结构化表格")
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    text_layers.append(page.extract_text() or "")
         except Exception as e:
-            print(f"⚠️ 表格提取部分失败: {e}")
+            print(f"⚠️ PDF 文本层提取失败: {e}")
 
         # --- 2. 视觉 OCR 阶段 (PyMuPDF + PaddleOCR) ---
         try:
@@ -48,55 +69,64 @@ class DocParser:
             print(f">>> [Parser] 开始逐页高精度 OCR (共 {total_pages} 页)...")
             
             for i, page in enumerate(doc):
+                page_no = i + 1
                 print(f"    -> 正在处理第 {i+1}/{total_pages} 页...")
                 try:
                     # 3倍分辨率 (300 DPI)
                     zoom_matrix = fitz.Matrix(3, 3) 
                     pix = page.get_pixmap(matrix=zoom_matrix)
-                    
-                    img_name = f"temp_page_{i}.png"
+
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir="temp_uploads") as tmp:
+                        img_name = tmp.name
                     pix.save(img_name)
-                    
-                    # ✅【关键修复】这里去掉了 cls=True，只传图片路径
-                    ocr_result = self.ocr.ocr(img_name)
-                    
-                    # 提取纯文本
-                    page_pure_text = ""
-                    if ocr_result and ocr_result[0]:
-                        # 过滤低置信度字符
-                        page_pure_text = "\n".join([line[1][0] for line in ocr_result[0] if line[1][1] > 0.6])
-                    
-                    # 清理临时图片
+
+                    page_pure_text = self.ocr_image(img_name)
+
                     if os.path.exists(img_name):
                         os.remove(img_name)
 
                     # 数据组装
                     page_content = f"\n\n--- 第 {i+1} 页数据开始 ---\n"
-                    
-                    if i in table_map:
+
+                    text_layer = text_layers[i] if i < len(text_layers) else ""
+                    if text_layer:
+                        page_content += f"\n【文本层】:\n{text_layer}\n"
+
+                    if page_no in table_map:
                         page_content += "\n【检测到本页包含统计表，已结构化还原】:\n"
-                        for tbl_md in table_map[i]:
-                            page_content += f"\n{tbl_md}\n"
-                        
-                        page_content +=f"\n[本页OCR原始文本补充]:\n{page_pure_text}\n"
-                    else:
-                        page_content += page_pure_text
+                        for table in table_map[page_no]:
+                            page_content += f"\n{table['table_markdown']}\n"
+
+                    if page_pure_text:
+                        page_content += f"\n[本页OCR原始文本补充]:\n{page_pure_text}\n"
 
                     page_content += f"\n--- 第 {i+1} 页数据结束 ---\n"
                     full_content.append(page_content)
+                    pages.append({
+                        "page_no": page_no,
+                        "ocr_text": page_pure_text,
+                        "text_layer": text_layer
+                    })
 
                 except Exception as inner_e:
                     print(f"❌ 第 {i+1} 页解析出错: {inner_e}")
                     # 打印具体错误以便调试
-                    # traceback.print_exc() 
                     continue 
 
             doc.close()
-            return "\n".join(full_content)
+            return {
+                "text": "\n".join(full_content),
+                "pages": pages,
+                "tables": table_entries
+            }
             
         except Exception as e:
             print(f"❌ PDF 文件打开失败: {e}")
-            return ""
+            return {
+                "text": "",
+                "pages": [],
+                "tables": []
+            }
 
 if __name__ == "__main__":
     parser = DocParser()

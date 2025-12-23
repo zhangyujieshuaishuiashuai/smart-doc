@@ -11,7 +11,7 @@ class RAGEngine:
         self.doc_store = {} 
         self.counter = 0
 
-    def add_document(self, text, source_filename):
+    def add_document(self, text, source_filename, extra_chunks=None):
         """
         优化后的切片策略：针对 Markdown 表格优化
         """
@@ -52,31 +52,59 @@ class RAGEngine:
         if current_chunk:
             chunks.append("\n".join(current_chunk))
 
-        if not chunks: 
+        chunks = [chunk for chunk in chunks if chunk.strip()]
+
+        prepared_chunks = []
+        for i, chunk in enumerate(chunks):
+            prepared_chunks.append({
+                "text": chunk,
+                "meta": {
+                    "source": source_filename,
+                    "chunk_id": i,
+                    "chunk_type": "text"
+                }
+            })
+
+        if extra_chunks:
+            for idx, chunk in enumerate(extra_chunks):
+                chunk_text = chunk.get("text", "")
+                if not chunk_text:
+                    continue
+                prepared_chunks.append({
+                    "text": chunk_text,
+                    "meta": {
+                        "source": source_filename,
+                        "chunk_id": f"extra-{idx}",
+                        "chunk_type": chunk.get("chunk_type", "table"),
+                        "page_no": chunk.get("page_no"),
+                        "table_id": chunk.get("table_id")
+                    }
+                })
+
+        if not prepared_chunks:
             return 0
 
-        print(f">>> [RAG] 生成了 {len(chunks)} 个知识切片，开始 Embedding...")
+        print(f">>> [RAG] 生成了 {len(prepared_chunks)} 个知识切片，开始 Embedding...")
 
         # 批量计算向量
-        vectors = self.embed_model.encode(chunks)
+        vectors = self.embed_model.encode([chunk["text"] for chunk in prepared_chunks])
         
         # 存入 FAISS
         self.index.add(np.array(vectors).astype('float32'))
         
         # 存元数据
         added_count = 0
-        for i, chunk in enumerate(chunks):
+        for chunk in prepared_chunks:
             self.doc_store[self.counter] = {
-                "text": chunk,
-                "source": source_filename,
-                "chunk_id": i
+                "text": chunk["text"],
+                **chunk["meta"]
             }
             self.counter += 1
             added_count += 1
             
         return added_count
 
-    def search(self, query, top_k=5): # 增加检索数量，提高召回率
+    def search(self, query, top_k=5, file_filter=None): # 增加检索数量，提高召回率
         if self.index.ntotal == 0:
             return []
             
@@ -91,10 +119,16 @@ class RAGEngine:
             # 过滤掉太短的无意义片段
             if len(meta.get("text", "")) < 10:
                 continue
+
+            if file_filter and meta.get("source") != file_filter:
+                continue
                 
             results.append({
                 "score": float(D[0][idx]),
                 "text": meta.get("text", ""),
-                "source": meta.get("source", "")
+                "source": meta.get("source", ""),
+                "chunk_type": meta.get("chunk_type", "text"),
+                "page_no": meta.get("page_no"),
+                "table_id": meta.get("table_id")
             })
         return results
