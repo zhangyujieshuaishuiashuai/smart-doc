@@ -1,0 +1,27 @@
+# IDE
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Build and runtime
+data/
+tmp/
+output/
+*.log
+
+# Archives / large artifacts
+*.zip
+*.7z
+*.rar
+
+# OS
+.DS_Store
+Thumbs.db

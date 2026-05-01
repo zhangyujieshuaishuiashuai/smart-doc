@@ -1,0 +1,69 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: smart-doc-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: smart_doc_db
+      TZ: Asia/Tokyo
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    # 明确服务器默认字符集，避免部分环境下默认不是 utf8mb4
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+
+  ai-engine:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    container_name: smart-doc-ai-engine
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      TZ: Asia/Tokyo
+      DATA_DIR: /app/data
+      OCR_LANG: ch
+      OCR_CONFIDENCE: "0.6"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mysql
+
+  backend:
+    build:
+      context: ./backend-server/backend-server
+      dockerfile: Dockerfile
+    container_name: smart-doc-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Asia/Tokyo
+      SPRING_PROFILES_ACTIVE: docker
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mysql
+      - ai-engine
+
+  frontend:
+    image: node:20-alpine
+    container_name: smart-doc-frontend
+    working_dir: /app
+    volumes:
+      - ./frontend-web:/app
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_BACKEND_BASE_URL=http://localhost:8080
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    depends_on:
+      - backend

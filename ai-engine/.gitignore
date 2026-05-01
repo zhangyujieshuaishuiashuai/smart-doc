@@ -1,0 +1,12 @@
+.venv/
+.env
+__pycache__/
+core/__pycache__/
+*.pyc
+*.pyo
+
+data/
+temp_uploads/
+
+paper-reference/
+ai-engine-paper-reference.zip

@@ -1,0 +1,866 @@
+﻿<template>
+  <div class="app">
+    <header class="header">
+      <div class="title">
+        <el-icon class="title-icon"><Document /></el-icon>
+        Smart Doc 多模态解析平台
+      </div>
+      <div class="right">
+        <el-button type="primary" plain size="small" @click="loadDocs">刷新文档列表</el-button>
+      </div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar">
+        <el-card class="card upload-card" shadow="hover">
+          <template #header>
+            <span class="card-title">快速上传</span>
+          </template>
+          <div class="upload">
+            <el-form label-position="top" class="upload-form">
+              <el-form-item label="清洗模式">
+                <el-radio-group v-model="uploadForm.cleanMode" size="small">
+                  <el-radio-button label="paper">论文</el-radio-button>
+                  <el-radio-button label="notice">公告/通知</el-radio-button>
+                  <el-radio-button label="general">通用/手写</el-radio-button>
+                </el-radio-group>
+              </el-form-item>
+            </el-form>
+                        <el-upload
+              ref="uploadRef"
+              :show-file-list="false"
+              :multiple="true"
+              accept=".pdf,image/*"
+              :before-upload="beforeUploadAny"
+            >
+              <el-button type="primary" class="upload-btn">上传 PDF / 图片（可多选）</el-button>
+            </el-upload>
+            <div class="hint"><el-icon><InfoFilled /></el-icon> 支持 OCR + 表格解析自动入库，可一次多选文件上传。</div>
+          </div>
+        </el-card>
+
+        <el-card class="card list-card" shadow="hover">
+          <template #header>
+            <div class="doc-header">
+              <span class="card-title">我的文档</span>
+              <el-input v-model="docFilter" size="small" placeholder="搜索文件名..." clearable :prefix-icon="Search" class="doc-filter" />
+            </div>
+          </template>
+
+          <el-scrollbar class="doc-list-scroll" always>
+            <div class="doc-list">
+              <div
+                v-for="d in filteredDocs"
+                :key="d.id"
+                class="doc-item"
+                :class="{ active: d.id === activeDocId }"
+                @click="selectDoc(d.id)"
+              >
+                <div class="doc-name" :title="d.filename">{{ d.filename }}</div>
+                <el-tag v-if="d.status === 1" type="success" size="small" effect="light">
+                  {{ d.vectorDocId ? "已入库" : "已解析" }}
+                </el-tag>
+                <el-tag v-else-if="d.status === 0" type="warning" size="small" effect="light">处理中</el-tag>
+                <el-tag v-else type="danger" size="small" effect="light">异常</el-tag>
+              </div>
+            </div>
+          </el-scrollbar>
+        </el-card>
+      </aside>
+
+      <main class="content">
+        <el-card class="card main-card" shadow="hover">
+          <template #header>
+            <div class="topbar">
+              <div class="doc-title">
+                <span class="active-filename">{{ activeDoc?.filename || "请在左侧选择文档。" }}</span>
+                <el-tag
+                  v-if="activeDoc"
+                  :type="activeDoc.status === 1 ? 'success' : activeDoc.status === 0 ? 'warning' : 'danger'"
+                  size="small"
+                  effect="dark"
+                >
+                  {{ activeDoc.status === 1 ? (activeDoc.vectorDocId ? "向量就绪" : "就绪") : activeDoc.status === 0 ? "处理中" : "失败" }}
+                </el-tag>
+                <el-button
+                  v-if="activeDocId"
+                  type="primary"
+                  plain
+                  size="small"
+                  :loading="reparsing"
+                  @click="reparseCurrentDoc"
+                >
+                  按当前模式重新解析
+                </el-button>
+              </div>
+              <div class="topbar-right">
+                <el-switch 
+                  v-model="onlyThisDoc" 
+                  active-text="仅检索当前文档" 
+                  inactive-text="检索全部文档"
+                  style="--el-switch-on-color: #13ce66; --el-switch-off-color: #409eff;"
+                />
+              </div>
+            </div>
+          </template>
+
+          <div v-if="!activeDoc" class="empty-state">
+            <el-empty description="暂无活动文档，请点击左侧列表进行加载" />
+          </div>
+
+          <div v-else class="panel">
+            <div class="tab-container">
+              <el-radio-group v-model="activeTab" size="default">
+                <el-radio-button label="preview">视觉/OCR对齐</el-radio-button>
+                <el-radio-button label="tables">结构化表格提取</el-radio-button>
+                <el-radio-button label="chat">AI 对话增强</el-radio-button>
+              </el-radio-group>
+            </div>
+
+            <div v-show="activeTab === 'preview'" class="preview-grid">
+              <el-card shadow="never" class="subcard img-card">
+                <template #header>
+                  <div class="subheader">
+                    <span class="sub-title">文档源图视图</span>
+                    <el-select v-model="activePageNo" size="small" style="width: 130px" :disabled="pages.length === 0">
+                      <el-option v-for="p in pages" :key="pageNoOf(p)" :label="`第 ${pageNoOf(p)} 页`" :value="pageNoOf(p)" />
+                    </el-select>
+                  </div>
+                </template>
+                <div class="pagebox">
+                  <el-scrollbar class="dynamic-scroll" always>
+                    <div class="pagebox-inner">
+                      <div v-if="currentPage && currentPage.imageUrl" class="page-img-wrap">
+                        <img
+                          :src="toAbsoluteUrl(currentPage.imageUrl)"
+                          alt="page source"
+                          class="page-img"
+                          ref="pageImgRef"
+                          style="max-width: 100%; display: block"
+                          @load="onPageImgLoad"
+                        />
+                        <div
+                          v-for="(r, i) in activePageRects"
+                          :key="i"
+                          :ref="(el: any) => { if(el) rectRefs[r.hitIndex] = el as HTMLElement }"
+                          class="hit-rect"
+                          :class="{ active: r.isActive }"
+                          :style="r.style"
+                          :title="r.text"
+                          @click="jumpToHit(r.hitIndex)"
+                        ></div>
+                      </div>
+                      <el-empty v-else description="暂无源图" />
+                    </div>
+                  </el-scrollbar>
+                </div>
+              </el-card>
+
+              <el-card shadow="never" class="subcard text-card">
+                <template #header>
+                  <div class="subheader subheader-ocr">
+                    <div class="ocr-text-mode">
+                      <span class="sub-title">OCR 语义层映射</span>
+                      <el-radio-group v-model="textViewMode" size="small">
+                        <el-radio-button label="raw">原始OCR</el-radio-button>
+                        <el-radio-button label="display">展示文本</el-radio-button>
+                        <el-radio-button label="rag">RAG文本</el-radio-button>
+                      </el-radio-group>
+                    </div>
+                    <!-- 添加全文/当前页切换 -->
+                    <el-radio-group v-model="textScope" size="small">
+                      <el-radio-button label="doc">全文</el-radio-button>
+                      <el-radio-button label="page">当前页</el-radio-button>
+                    </el-radio-group>
+                    <div class="hl">
+                      <el-input 
+                        v-model="highlightKeyword" 
+                        size="small" 
+                        placeholder="搜索文档内容并高亮..." 
+                        clearable 
+                        @keyup.enter="() => applyHighlight(true)"
+                        style="width: 180px;"
+                      >
+                        <template #append>
+                          <el-button @click="() => applyHighlight(true)" :icon="Search" />
+                        </template>
+                      </el-input>
+                      <el-button-group class="nav-btn-group">
+                        <el-button size="small" :icon="ArrowUp" :disabled="hitCount === 0" @click="prevHit" />
+                        <el-button size="small" :icon="ArrowDown" :disabled="hitCount === 0" @click="nextHit" />
+                      </el-button-group>
+                      <el-tag type="info" size="small" effect="plain" class="hl-count">
+                        {{ hitCount ? `${activeHitIndex + 1} / ${hitCount}` : "0 / 0" }}
+                      </el-tag>
+                    </div>
+                  </div>
+                </template>
+                <el-scrollbar class="dynamic-scroll" always>
+                  <div class="ocr-text" ref="ocrTextRef" v-html="ocrHtml"></div>
+                </el-scrollbar>
+              </el-card>
+            </div>
+
+            <div v-show="activeTab === 'tables'" class="tables-view">
+              <el-table
+                v-if="currentDoc?.tables && currentDoc.tables.length > 0"
+                :data="currentDoc.tables"
+                stripe
+                border
+                class="custom-table"
+                style="width: 100%"
+                height="100%"
+              >
+                <el-table-column prop="id" label="ID" width="120" align="center" />
+                <el-table-column prop="page" label="出现页码" width="120" align="center">
+                  <template #default="{ row }">
+                    {{ row.page ?? row.pageNo ?? "—" }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="Markdown 数据结构预览">
+                  <template #default="{ row }">
+                    <pre style="white-space: pre-wrap" class="table-markdown md-preview">{{ row.markdown ?? "" }}</pre>
+                  </template>
+                </el-table-column>
+                <el-table-column label="数据导出" width="120" align="center">
+                  <template #default="{ row }">
+                    <el-button type="success" plain size="small" :icon="Download" @click="downloadCsv(row.id)">CSV</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <el-empty v-else :description="tableEmptyDescription" />
+            </div>
+
+            <div v-show="activeTab === 'chat'" class="chatbox-view">
+              <div class="chat-hint"><el-icon><Check /></el-icon> DeepSeek RAG 引擎已就绪，请输入自然语言指令。</div>
+              <div class="chat-row">
+                <el-input v-model="chatQuery" placeholder="基于本文档或知识库提问..." @keyup.enter="ask" clearable size="large" />
+                <el-button type="primary" size="large" :icon="Position" @click="ask" :loading="asking">发送</el-button>
+              </div>
+
+              <div class="chat-results" v-if="chatAnswer || chatSources.length">
+                <el-scrollbar always>
+                  <el-card shadow="never" v-if="chatAnswer" class="answer-card">
+                    <template #header><div class="section-title"><el-icon><ChatDotRound /></el-icon> AI 综合回答</div></template>
+                    <div class="answer-text">{{ chatAnswer }}</div>
+                  </el-card>
+
+                  <el-card shadow="never" v-if="chatSources.length" class="sources-card">
+                    <template #header><div class="section-title"><el-icon><Link /></el-icon> 召回证据链溯源</div></template>
+                    <div class="sources-list">
+                      <div class="src-item" v-for="(s, i) in chatSources" :key="i">
+                        <div class="src-meta">
+                          <el-tag size="small" type="info">匹配度 {{ (s.score ?? 0).toFixed?.(3) ?? s.score }}</el-tag>
+                          <el-tag size="small" :type="s.meta?.type === 'table' ? 'warning' : 'default'" style="margin-left: 8px;">
+                            {{ s.meta?.type === 'table' ? '结构化表格' : 'OCR文本' }}
+                          </el-tag>
+                          <el-tag size="small" type="success" effect="plain" style="margin-left: 8px;">
+                            {{ s.doc_name || (s.doc_id ? ('doc_id:' + s.doc_id) : 'unknown') }}
+                          </el-tag>
+                        </div>
+                        <pre class="src-text">{{ s.text }}</pre>
+                      </div>
+                    </div>
+                  </el-card>
+                </el-scrollbar>
+              </div>
+            </div>
+            
+          </div>
+        </el-card>
+      </main>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { ElMessage } from "element-plus";
+import { Document, InfoFilled, Search, ArrowUp, ArrowDown, Download, Check, ChatDotRound, Link, Position } from '@element-plus/icons-vue'
+import {
+  listDocs, getDocDetail, uploadPdf, uploadImage, chat, reparseDoc,
+  tableCsvUrl, type Document as DocType, type DocumentPage, type ExtractedTable,
+  searchDocuments, type DocumentDetail, chatNew, type ChatRequest
+} from "./api";
+
+type OcrLine = { text: string; score?: number | null; box?: number[][] | null; };
+type Hit = { pageNo: number; text: string; box: number[][]; };
+type HitRect = { hitIndex: number; isActive: boolean; text: string; style: Record<string, string>; };
+type ChatSourceType = {
+  score: number;
+  meta: any;
+  text: string;
+  doc_id?: string | number;
+  doc_name?: string;
+}; // 显式声明数据类型
+
+const docs = ref<DocType[]>([]);
+const docFilter = ref("");
+const activeDocId = ref<number | null>(null);
+const activeDoc = computed(() => docs.value.find((d) => d.id === activeDocId.value) || null);
+
+const uploadForm = reactive({
+  cleanMode: "paper" as "paper" | "notice" | "general",
+});
+
+const textViewMode = ref<"raw" | "display" | "rag">("display");
+const textScope = ref<"doc" | "page">("doc"); // 添加文档/页面文本范围控制
+
+const docDetail = ref<DocumentDetail | null>(null);
+const pages = ref<DocumentPage[]>([]);
+const tables = ref<ExtractedTable[]>([]);
+const activePageNo = ref<number>(1);
+const activeTab = ref<"preview" | "tables" | "chat">("preview");
+const reparsing = ref(false);
+const highlightKeyword = ref("");
+const onlyThisDoc = ref(true);
+
+const chatQuery = ref("");
+const chatAnswer = ref("");
+const chatSources = ref<ChatSourceType[]>([]); // 修复 any 带来的 unknown 推导
+const asking = ref(false);
+const uploadRef = ref<any>(null);
+
+// 添加搜索相关变量
+const searchResults = ref<any[]>([]);
+const globalSearchResults = ref<any[]>([]);
+
+const ocrHtml = ref("");
+const ocrTextRef = ref<HTMLElement | null>(null);
+const pageImgRef = ref<HTMLImageElement | null>(null);
+
+const imgNatural = ref({ w: 0, h: 0 });
+const imgClient = ref({ w: 0, h: 0 });
+
+const hits = ref<Hit[]>([]);
+const textMarks = ref<HTMLElement[]>([]);
+const activeHitIndex = ref(0);
+
+// DOM 节点缓存字典：隔离图片视图与文本视图索引关系
+const rectRefs = ref<Record<number, HTMLElement>>({});
+
+const hasBoxHits = computed(() => hits.value.length > 0);
+const hitCount = computed(() => (hasBoxHits.value ? hits.value.length : textMarks.value.length));
+
+function toAbsoluteUrl(url?: string | null) {
+  if (!url) return "";
+  if (url.startsWith("http://") || url.startsWith("https://")) return url;
+  const base = import.meta.env.VITE_AGENT_BASE_URL || "http://127.0.0.1:8001";
+  return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
+function pageNoOf(p: DocumentPage): number {
+  return p.page ?? 0;
+}
+
+const currentPage = computed(() => {
+  const n = activePageNo.value;
+  return pages.value.find((p) => pageNoOf(p) === n) ?? null;
+});
+
+const currentDoc = computed(() => {
+  if (!docDetail.value) return null;
+  // 将 DocumentDetail 转换为兼容的 Document 类型
+  const doc: any = { ...docDetail.value };
+  doc.filename = doc.fileName; //映射字段名称
+  doc.status = doc.status ?? 1; // 使用现有的状态或默认值1
+  const t = docDetail.value.tables?.length ? docDetail.value.tables : tables.value.length ? tables.value : [];
+  return { ...doc, tables: t };
+});
+
+const tableEmptyDescription = computed(() => {
+  const d = docDetail.value;
+  if (!d) return "暂无数据";
+  const s = d.tableExtractStatus;
+  if (s === "not_applicable") return "当前文档类型不适用表格提取";
+  if (s === "library_unavailable") return "表格提取依赖未安装";
+  if (s === "no_table_found") {
+    return currentDoc.value?.vectorDocId
+      ? "向量已入库；当前文档未识别到可提取表格，因此没有 CSV 可下载"
+      : "未识别到可提取表格";
+  }
+  return "暂无结构化表格结果";
+});
+
+function pageTextRaw(p: DocumentPage): string {
+  return p.rawOcrText ?? "";
+}
+
+function pageTextDisplay(p: DocumentPage): string {
+  return p.displayText ?? p.text ?? "";
+}
+
+function pageTextRag(p: DocumentPage): string {
+  return p.cleanTextForRag ?? "";
+}
+
+/** 当前 OCR 文本：原始 / 展示 / RAG（与后端 PageVO 对齐） */
+const currentText = computed(() => {
+  const doc = currentDoc.value;
+  const p = currentPage.value;
+
+  if (textScope.value === "doc") {
+    if (!doc) return "";
+    if (textViewMode.value === "raw") {
+      return doc.rawOcrText || "";
+    }
+    if (textViewMode.value === "rag") {
+      return doc.cleanTextForRag || "";
+    }
+    return doc.displayText || "";
+  }
+
+  if (!p) return "";
+  if (textViewMode.value === "raw") {
+    return p.rawOcrText || p.text || "";
+  }
+  if (textViewMode.value === "rag") {
+    return p.cleanTextForRag || "";
+  }
+  return p.displayText || p.text || "";
+});
+
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function renderHighlight(text: string, kw: string) {
+  const safe = escapeHtml(text || "");
+  const k = (kw || "").trim();
+  if (!k) return `<pre>${safe}</pre>`;
+  try {
+    const re = new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+    const hl = safe.replace(re, (m) => `<mark>${m}</mark>`);
+    return `<pre>${hl}</pre>`;
+  } catch {
+    return `<pre>${safe}</pre>`;
+  }
+}
+
+function syncTextMarks() {
+  const root = ocrTextRef.value;
+  if (!root) {
+    textMarks.value = [];
+    return;
+  }
+  const marks = Array.from(root.querySelectorAll("mark")) as HTMLElement[];
+  textMarks.value = marks;
+  if (activeHitIndex.value >= marks.length) {
+    activeHitIndex.value = 0;
+  }
+}
+
+function scrollToTextHit(index: number) {
+  const marks = textMarks.value;
+  if (!marks.length) return;
+  const i = clamp(index, 0, marks.length - 1);
+  activeHitIndex.value = i;
+  // 显式添加 HTMLElement 与 number 类型
+  marks.forEach((m: HTMLElement, idx: number) => m.classList.toggle("active", idx === activeHitIndex.value));
+  marks[i].scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function applyHighlight(jumpToFirst = false) {
+  ocrHtml.value = renderHighlight(currentText.value, highlightKeyword.value);
+  await nextTick();
+  syncTextMarks();
+
+  if (jumpToFirst && hitCount.value > 0) {
+    jumpToHit(0);
+  }
+}
+
+function safeParseOcrLinesJson(s?: string | null): OcrLine[] {
+  if (!s) return [];
+  try {
+    const v = JSON.parse(s);
+    if (!Array.isArray(v)) return [];
+    return v as OcrLine[];
+  } catch { return []; }
+}
+
+function rebuildHits() {
+  const kw = (highlightKeyword.value || "").trim();
+  rectRefs.value = {}; 
+  if (!kw) {
+    hits.value = [];
+    activeHitIndex.value = 0;
+    return;
+  }
+
+  const out: Hit[] = [];
+  for (const p of pages.value) {
+    const lines = safeParseOcrLinesJson(p.ocrLinesJson);
+    const pn = pageNoOf(p);
+    for (const ln of lines) {
+      const t = (ln.text || "").trim();
+      if (!t || !t.includes(kw)) continue;
+      const box = ln.box;
+      if (!box || !Array.isArray(box) || box.length < 4) continue;
+      out.push({ pageNo: pn, text: t, box: box as number[][] });
+    }
+  }
+
+  hits.value = out;
+  activeHitIndex.value = 0;
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+// 核心逻辑：双轨滚动同步
+async function jumpToHit(index: number) {
+  if (hitCount.value === 0) return;
+
+  const i = clamp(index, 0, hitCount.value - 1);
+  activeHitIndex.value = i;
+
+  if (!hasBoxHits.value) {
+    scrollToTextHit(i);
+    return;
+  }
+
+  const h = hits.value[i];
+  
+  // 机制 1：跨页检测与重绘阻塞
+  if (h && h.pageNo !== activePageNo.value) {
+    activePageNo.value = h.pageNo;
+    await nextTick(); // 等待图片挂载完成
+  }
+
+  // Mechanism 2: refresh text highlight on target page
+  await applyHighlight(false);
+  
+  // 显式声明 x 为 Hit 类型
+  //筛选出当前活动页面的所有命中结果
+  //在当前页面命中结果中找到目标命中项的索引
+  const currentPageHits = hits.value.filter((x: Hit) => x.pageNo === activePageNo.value);
+  const localIndex = currentPageHits.indexOf(h);
+
+  // 1) 文本面板滚动同步
+  if (localIndex >= 0 && textMarks.value.length > localIndex) {
+     textMarks.value.forEach((m: HTMLElement) => m.classList.remove('active')); // 显式声明 HTMLElement
+     const targetMark = textMarks.value[localIndex];
+     targetMark.classList.add('active');
+     targetMark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  // 2) 图片面板滚动同步
+  await nextTick();
+  const rectEl = rectRefs.value[i];
+  if (rectEl) {
+     rectEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+  }
+}
+
+//实现上一个命中项导航，支持循环
+function prevHit() {
+  if (hitCount.value === 0) return;
+  const i = activeHitIndex.value - 1;
+  jumpToHit(i < 0 ? hitCount.value - 1 : i);
+}
+//实现下一个命中项导航，支持循环
+function nextHit() {
+  if (hitCount.value === 0) return;
+  const i = activeHitIndex.value + 1;
+  jumpToHit(i > hitCount.value - 1 ? 0 : i);
+}
+
+const activePageRects = computed<HitRect[]>(() => {
+  const imgW = imgNatural.value.w;
+  const imgH = imgNatural.value.h;
+  const vw = imgClient.value.w;
+  const vh = imgClient.value.h;
+
+  if (!imgW || !imgH || !vw || !vh) return [];
+
+  const sx = vw / imgW;
+  const sy = vh / imgH;
+
+  const rects: HitRect[] = [];
+  for (let idx = 0; idx < hits.value.length; idx++) {
+    const h = hits.value[idx];
+    if (h.pageNo !== activePageNo.value) continue;
+
+    const pts = h.box || [];
+    const xs = pts.map((p: number[]) => p[0]); // 显式声明 number[]
+    const ys = pts.map((p: number[]) => p[1]);
+
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    const left = minX * sx;
+    const top = minY * sy;
+    const width = (maxX - minX) * sx;
+    const height = (maxY - minY) * sy;
+
+    rects.push({
+      hitIndex: idx, 
+      isActive: idx === activeHitIndex.value,
+      text: h.text,
+      style: {
+        left: `${left}px`,
+        top: `${top}px`,
+        width: `${width}px`,
+        height: `${height}px`,
+      },
+    });
+  }
+  return rects;
+});
+
+// 图片加载完成后获取其自然尺寸和当前客户端显示尺寸
+function onPageImgLoad() {
+  const img = pageImgRef.value;
+  if (!img) return;
+  imgNatural.value = { w: img.naturalWidth || 0, h: img.naturalHeight || 0 };
+  imgClient.value = { w: img.clientWidth || 0, h: img.clientHeight || 0 };
+}
+
+//窗口变化时否需要重新计算图片显示尺寸
+function onResize() {
+  const img = pageImgRef.value;
+  if (!img) return;
+  imgClient.value = { w: img.clientWidth || 0, h: img.clientHeight || 0 };
+}
+
+// 显式声明 computed 返回数组泛型，防止循环中的 d 被判定为 unknown
+const filteredDocs = computed<DocType[]>(() => {
+  const k = docFilter.value.trim().toLowerCase();
+  const arr = [...docs.value].sort((a, b) => (b.id ?? 0) - (a.id ?? 0));
+  if (!k) return arr;
+  return arr.filter((d) => (d.filename || "").toLowerCase().includes(k));
+});
+
+async function loadDocs() {
+  docs.value = await listDocs();
+  if (!activeDocId.value && docs.value.length) {
+    const firstDoc = docs.value[0];
+    activeDocId.value = firstDoc.id ?? null;
+  }
+}
+
+async function selectDoc(id: number) {
+  activeDocId.value = id;
+}
+
+// 设置活动文档
+watch(activeDocId, async (id: number | null) => {
+  if (!id) {
+    docDetail.value = null;
+    pages.value = [];
+    tables.value = [];
+    return;
+  }
+  const detail = await getDocDetail(id);
+  docDetail.value = detail;
+  pages.value = detail.pages || [];
+  tables.value = detail.tables || [];
+  activePageNo.value = pages.value.length ? pageNoOf(pages.value[0]) : 1;
+
+  rebuildHits();
+  await applyHighlight();
+  if (hits.value.length > 0) {
+    jumpToHit(0);
+  }
+});
+
+watch([() => pages.value, highlightKeyword], () => {
+  rebuildHits();
+});
+
+watch([currentText, highlightKeyword], () => {
+  applyHighlight();
+});
+
+watch(textViewMode, () => {
+  applyHighlight();
+});
+
+watch(activePageNo, () => {
+  nextTick(() => onResize());
+});
+
+function isPdfFile(file: File): boolean {
+  const lowerName = (file.name || "").toLowerCase();
+  return file.type === "application/pdf" || lowerName.endsWith(".pdf");
+}
+
+async function beforeUploadAny(file: File) {
+  try {
+    const mode = isPdfFile(file) ? uploadForm.cleanMode : "general";
+    const res = isPdfFile(file)
+      ? await uploadPdf(file, mode)
+      : await uploadImage(file, mode);
+    const uploadedName = res.filename || res.fileName || file.name;
+    if (res.status === 2) {
+      ElMessage.warning(`已上传但向量入库未完成：${uploadedName}`);
+    } else {
+      ElMessage.success(`已上传：${uploadedName}`);
+    }
+    await loadDocs();
+    activeDocId.value = res.id;
+  } catch (e: any) {
+    ElMessage.error(e?.message || "上传失败");
+  } finally {
+    uploadRef.value?.clearFiles?.();
+  }
+  return false;
+}
+
+//重新解析当前文档,并根据当前选择的清洗模式（uploadForm.cleanMode）进行处理
+async function reparseCurrentDoc() {
+  const id = activeDocId.value;
+  if (!id) return;
+  reparsing.value = true;
+  try {
+    const docId = Number(id);
+    await reparseDoc(docId, uploadForm.cleanMode);
+    ElMessage.success("已提交重新解析，请稍后刷新或等待状态更新");
+    const detail = await getDocDetail(docId);
+    docDetail.value = detail;
+    pages.value = detail.pages || [];
+    tables.value = detail.tables || [];
+    await loadDocs();
+    activePageNo.value = pages.value.length ? pageNoOf(pages.value[0]) : 1;
+    rebuildHits();
+    await applyHighlight();
+  } catch (e: any) {
+    ElMessage.error(e?.message || "重新解析失败");
+  } finally {
+    reparsing.value = false;
+  }
+}
+
+function downloadCsv(tableId: string | number) {
+  if (!activeDocId.value) return;
+  window.open(tableCsvUrl(activeDocId.value, tableId), "_blank");
+}
+
+async function ask() {
+  const q = chatQuery.value.trim();
+  if (!q) return;
+  asking.value = true;
+  chatAnswer.value = "";
+  chatSources.value = [];
+  try {
+    const req: ChatRequest = {
+      question: q,
+      isolate: onlyThisDoc.value,
+      docId: onlyThisDoc.value && activeDoc.value ? activeDoc.value.id : undefined,
+    };
+    const res = await chatNew(req);
+    chatAnswer.value = res.answer || "";
+    chatSources.value = res.contexts || [];
+  } catch (e: any) {
+    ElMessage.error(e?.message || "服务拒绝访问");
+  } finally {
+    asking.value = false;
+  }
+}
+
+// 添加搜索函数
+async function onSearch(keyword: string) {
+  if (!keyword.trim()) return;
+
+  if (onlyThisDoc.value && currentDoc.value?.id) {
+    const res = await searchDocuments({
+      keyword,
+      isolate: true,
+      docId: currentDoc.value.id,
+    });
+    searchResults.value = res || [];
+  } else {
+    const res = await searchDocuments({
+      keyword,
+      isolate: false,
+    });
+    globalSearchResults.value = res || [];
+  }
+}
+
+onMounted(() => {
+  loadDocs();
+  window.addEventListener("resize", onResize);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("resize", onResize);
+});
+</script>
+
+<style scoped>
+/* 此处的 style 代码保持原有设计，没有任何改动 */
+.app { height: 100vh; display: flex; flex-direction: column; background: #eef2f6; font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif; overflow: hidden; }
+.header { height: 60px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; background: #ffffff; box-shadow: 0 2px 8px rgba(0,0,0,0.04); z-index: 100; }
+.title { font-size: 20px; font-weight: 700; color: #1f2f3d; display: flex; align-items: center; gap: 8px; }
+.title-icon { color: #409eff; }
+.body { flex: 1; display: flex; gap: 16px; padding: 16px; overflow: hidden; }
+.sidebar { width: 340px; display: flex; flex-direction: column; gap: 16px; flex-shrink: 0; }
+.content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.card { height: 100%; display: flex; flex-direction: column; border: none; border-radius: 12px; }
+:deep(.el-card__header) { padding: 14px 20px; border-bottom: 1px solid #f0f2f5; background: #fcfcfd; border-radius: 12px 12px 0 0; }
+:deep(.el-card__body) { padding: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.card-title { font-weight: 600; color: #303133; }
+.upload-card { height: auto; flex-shrink: 0; }
+.upload { display: flex; flex-direction: column; gap: 12px; padding: 20px; }
+.upload-btn { width: 100%; border-radius: 8px; }
+.hint { font-size: 13px; color: #909399; margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+.list-card { flex: 1; }
+.doc-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.doc-filter { width: 160px; }
+.doc-list-scroll { height: calc(100vh - 350px); }
+.doc-list { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
+.doc-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-radius: 8px; cursor: pointer; background: #fff; border: 1px solid #ebeef5; transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1); }
+.doc-item:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.05); border-color: #d9ecff; }
+.doc-item.active { background: #ecf5ff; border-color: #409eff; }
+.doc-name { font-size: 14px; color: #303133; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 180px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; }
+.active-filename { font-size: 16px; font-weight: 600; color: #303133; }
+.doc-title { display: flex; align-items: center; gap: 12px; }
+.empty-state { display: flex; align-items: center; justify-content: center; height: 100%; background: #fff; }
+.panel { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: #fff; }
+.tab-container { padding: 12px 20px; border-bottom: 1px solid #ebeef5; background: #fff; }
+.preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; overflow: hidden; padding: 16px; background: #f9fafc; }
+.subcard { display: flex; flex-direction: column; background: #fff; border: 1px solid #e4e7ed; border-radius: 8px; box-shadow: 0 2px 12px 0 rgba(0,0,0,0.02); overflow: hidden; }
+.sub-title { font-weight: 600; font-size: 14px; color: #606266; }
+.subheader { display: flex; align-items: center; justify-content: space-between; }
+.subheader-ocr { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+.ocr-text-mode { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+.upload-form { margin: -4px 0 0; }
+.upload-form :deep(.el-form-item) { margin-bottom: 8px; }
+.upload-form :deep(.el-form-item__label) { font-size: 13px; padding-bottom: 4px; }
+.table-markdown { margin: 0; }
+.dynamic-scroll { height: calc(100vh - 250px); }
+.hl { display: flex; align-items: center; gap: 8px; }
+.nav-btn-group { display: flex; margin-left: 4px; }
+.hl-count { min-width: 60px; text-align: center; }
+.pagebox-inner { display: flex; justify-content: center; padding: 16px; background: #edeff2; min-height: 100%; }
+.page-img-wrap { position: relative; width: 100%; max-width: 800px; display: flex; flex-direction: column; }
+.page-img { width: 100%; border: 1px solid #dcdfe6; border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.06); object-fit: contain; }
+.hit-rect { position: absolute; border: 2px solid rgba(250, 173, 20, 0.7); background: rgba(250, 173, 20, 0.15); border-radius: 3px; cursor: pointer; transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); box-sizing: border-box; }
+.hit-rect:hover { border-color: rgba(245, 108, 108, 0.9); background: rgba(245, 108, 108, 0.2); }
+.hit-rect.active { border-color: #f56c6c; border-width: 3px; background: rgba(245, 108, 108, 0.25); transform: scale(1.02); box-shadow: 0 0 0 4px rgba(245, 108, 108, 0.2), 0 4px 12px rgba(245, 108, 108, 0.4); z-index: 20; }
+.ocr-text { padding: 20px; font-size: 14px; line-height: 1.8; color: #303133; }
+.ocr-text pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; }
+.ocr-text :deep(mark) { background: #faeab8; padding: 2px 4px; border-radius: 4px; transition: all 0.25s ease; cursor: pointer; }
+.ocr-text :deep(mark.active) { background: #fde2e2; color: #f56c6c; outline: 2px solid #f56c6c; outline-offset: 1px; font-weight: bold; }
+.tables-view { flex: 1; padding: 16px; overflow: hidden; }
+.custom-table { border-radius: 8px; overflow: hidden; box-shadow: 0 2px 12px 0 rgba(0,0,0,0.02); }
+.md-preview { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace; font-size: 13px; color: #606266; background: #f5f7fa; padding: 12px; border-radius: 6px; white-space: pre-wrap; margin: 0; border: 1px solid #e4e7ed; }
+.chatbox-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: #fafafa; }
+.chat-hint { padding: 16px 24px; color: #67c23a; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; background: #f0f9eb; border-bottom: 1px solid #e1f3d8; }
+.chat-row { display: flex; gap: 12px; padding: 20px 24px; background: #fff; border-bottom: 1px solid #ebeef5; }
+.chat-results { flex: 1; padding: 20px; overflow: hidden; }
+.section-title { font-weight: 600; color: #303133; display: flex; align-items: center; gap: 8px; }
+.answer-card { margin-bottom: 16px; border-color: #d9ecff; border-left: 4px solid #409eff; }
+.answer-text { white-space: pre-wrap; line-height: 1.8; color: #303133; font-size: 15px; }
+.sources-card { border-color: #e4e7ed; background: #fdfdfd; }
+.sources-list { display: flex; flex-direction: column; gap: 12px; }
+.src-item { border: 1px solid #ebeef5; border-radius: 8px; padding: 16px; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.02); }
+.src-meta { margin-bottom: 10px; }
+.src-text { margin: 0; white-space: pre-wrap; font-size: 13px; color: #606266; line-height: 1.6; background: #f5f7fa; padding: 10px; border-radius: 4px; }
+</style>

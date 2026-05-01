@@ -1,0 +1,37 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: smart-doc-backend
+
+  datasource:
+    # 关键：明确 useUnicode/characterEncoding，避免 OCR 中文入库变 ??? 或空
+    url: jdbc:mysql://127.0.0.1:3306/smart_doc_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true&useUnicode=true&characterEncoding=utf8&connectionCollation=utf8mb4_unicode_ci
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+  cloud:
+    openfeign:
+      client:
+        config:
+          default:
+            connectTimeout: 10000
+            readTimeout: 600000
+
+ai-engine:
+  url: http://127.0.0.1:8001
+
+storage:
+  base-dir: D:/smart-doc-platform-planB/data
